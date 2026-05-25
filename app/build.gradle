@@ -56,5 +56,9 @@ dependencies {
     api "com.github.AppDevNext.Logcat:LogcatCoreLib:$logcat_core_version"
     api "com.github.AppDevNext.Logcat:LogcatCoreUI:$logcat_core_version"
 
+    // Add this to your dependencies in app/build.gradle
+    implementation "io.dronefleet.mavlink:mavlink:1.1.11"
+    testImplementation 'junit:junit:4.13.2'
+
     implementation project(':library-client-rtsp')
 }

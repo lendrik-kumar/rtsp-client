@@ -11,7 +11,9 @@ import android.os.*
 import android.provider.MediaStore
 import android.util.Log
 import android.view.*
+import android.widget.EditText
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
@@ -20,7 +22,9 @@ import androidx.lifecycle.lifecycleScope
 import com.alexvas.rtsp.codec.VideoDecodeThread
 import com.alexvas.rtsp.codec.RtspVideoRecorder
 import com.alexvas.rtsp.demo.R
+import com.alexvas.rtsp.demo.data.TelemetryData
 import com.alexvas.rtsp.demo.databinding.FragmentLiveBinding
+import com.alexvas.rtsp.demo.util.MavlinkTcpClient
 import com.alexvas.rtsp.widget.RtspDataListener
 import com.alexvas.rtsp.widget.RtspStatusListener
 import kotlinx.coroutines.delay
@@ -42,8 +46,12 @@ class LiveFragment : Fragment() {
     private var isThermalMode = false
     private var recordingUri: Uri? = null
 
-    private var isStretchMode = false
     private var currentRotation = 0
+    private var isRotating = false
+
+    private var mavClient: MavlinkTcpClient? = null
+    private var osdIp = "192.168.1.12"
+    private var osdPort = 20001
 
     private lateinit var scaleGestureDetector: ScaleGestureDetector
     private var scaleFactor = 1.0f
@@ -87,6 +95,7 @@ class LiveFragment : Fragment() {
         }
 
         override fun onRtspStatusDisconnected() {
+            if (isRotating) return
             _binding?.let { b ->
                 context?.let { ctx ->
                     b.vStatusDot.backgroundTintList = ContextCompat.getColorStateList(ctx, android.R.color.holo_red_dark)
@@ -99,6 +108,7 @@ class LiveFragment : Fragment() {
         }
 
         override fun onRtspStatusFailed(message: String?) {
+            if (isRotating) return
             _binding?.let { b ->
                 context?.let { ctx ->
                     b.vStatusDot.backgroundTintList = ContextCompat.getColorStateList(ctx, android.R.color.holo_red_dark)
@@ -109,6 +119,7 @@ class LiveFragment : Fragment() {
         }
 
         override fun onRtspFirstFrameRendered() {
+            isRotating = false
             _binding?.let { b ->
                 b.vShutterSurface.visibility = View.GONE
                 b.bnSnapshot.isEnabled = true
@@ -127,8 +138,8 @@ class LiveFragment : Fragment() {
                     val format = if (isThermalMode) b.ivVideoImage.getVideoMediaFormat() else b.svVideoSurface.getVideoMediaFormat()
                     if (format != null) {
                         recorder.start(format)
-                        recorder.writeVideoData(data, offset, length, timestampUs, isKeyframe)
                     }
+                    recorder.writeVideoData(data, offset, length, timestampUs, isKeyframe)
                 }
             }
         }
@@ -142,6 +153,7 @@ class LiveFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        stopMavlink()
         handler.removeCallbacksAndMessages(null)
         _binding = null
     }
@@ -156,17 +168,21 @@ class LiveFragment : Fragment() {
         binding.ivVideoImage.setStatusListener(rtspStatusListener)
         binding.ivVideoImage.setDataListener(rtspDataListener)
 
+        // Ensure OSD is on top
+        binding.svVideoSurface.setZOrderMediaOverlay(true)
+
         // Force Software Decoding
         binding.svVideoSurface.videoDecoderType = VideoDecodeThread.DecoderType.SOFTWARE
         binding.ivVideoImage.videoDecoderType = VideoDecodeThread.DecoderType.SOFTWARE
 
-        binding.bnThermalToggle.setOnClickListener { toggleThermal() }
         binding.bnReload.setOnClickListener { reloadStream() }
+        binding.bnEditOsd.setOnClickListener { showOsdEditDialog() }
         binding.bnSnapshot.setOnClickListener { takeSnapshot() }
         binding.bnRecord.setOnClickListener { if (isRecording) stopRecording() else startRecording() }
 
-        binding.bnStretch.setOnClickListener { toggleStretch() }
         binding.bnRotate.setOnClickListener { rotateVideo() }
+
+        binding.bnThermalToggle.setOnClickListener { toggleThermal() }
 
         // Filter buttons
         binding.bnFilterWhite.setOnClickListener { applyFilter("W") }
@@ -176,8 +192,40 @@ class LiveFragment : Fragment() {
 
         setupInteractions()
 
+        liveViewModel.telemetryData.observe(viewLifecycleOwner) { data ->
+            updateOsd(data)
+        }
+
         liveViewModel.loadParams(requireContext())
         startPlayback()
+    }
+
+    private fun updateOsd(data: TelemetryData) {
+        binding.osdOverlayView.updateTelemetry(data)
+    }
+
+    private fun showOsdEditDialog() {
+        val input = EditText(requireContext())
+        input.setText("$osdIp:$osdPort")
+        input.setPadding(48, 48, 48, 48)
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Edit OSD Link")
+            .setMessage("Enter IP:Port (TCP)")
+            .setView(input)
+            .setPositiveButton("Update") { _, _ ->
+                val text = input.text.toString().trim()
+                val parts = text.split(":")
+                if (parts.size == 2) {
+                    osdIp = parts[0]
+                    osdPort = parts[1].toIntOrNull() ?: 20001
+                    reloadStream()
+                } else {
+                    Toast.makeText(context, "Invalid format. Use IP:Port", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -186,6 +234,14 @@ class LiveFragment : Fragment() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 scaleFactor *= detector.scaleFactor
                 scaleFactor = scaleFactor.coerceIn(1.0f, 5.0f)
+                
+                // If we are back to 1.0, snap back to center
+                if (scaleFactor <= 1.0f) {
+                    scaleFactor = 1.0f
+                    posX = 0f
+                    posY = 0f
+                }
+                
                 applyTransformations()
                 return true
             }
@@ -200,15 +256,23 @@ class LiveFragment : Fragment() {
                     lastTouchY = event.y
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (scaleFactor > 1.0f) {
-                        val dx = event.x - lastTouchX
-                        val dy = event.y - lastTouchY
+                    // Only pan if we are zoomed in
+                    if (scaleFactor > 1.0f && !scaleGestureDetector.isInProgress) {
+                        val dx = (event.x - lastTouchX)
+                        val dy = (event.y - lastTouchY)
                         posX += dx
                         posY += dy
+                        
                         applyTransformations()
                     }
                     lastTouchX = event.x
                     lastTouchY = event.y
+                }
+                MotionEvent.ACTION_UP -> {
+                    // If we zoomed out, reset position
+                    if (scaleFactor <= 1.0f) {
+                        resetTransformations()
+                    }
                 }
             }
             true
@@ -229,22 +293,19 @@ class LiveFragment : Fragment() {
         applyTransformations()
     }
 
-    private fun toggleStretch() {
-        isStretchMode = !isStretchMode
-        val dimensionRatio = if (isStretchMode) null else "16:9"
-        val layoutParams = binding.flVideoContainer.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-        layoutParams.dimensionRatio = dimensionRatio
-        binding.flVideoContainer.layoutParams = layoutParams
-
-        binding.ivVideoImage.scaleType = if (isStretchMode) android.widget.ImageView.ScaleType.FIT_XY else android.widget.ImageView.ScaleType.FIT_CENTER
-    }
-
     private fun rotateVideo() {
+        isRotating = true
         currentRotation = (currentRotation + 90) % 360
         // Reset transformations as center changes
         resetTransformations()
-        reloadStream()
+        applyRotationToViews()
+        
+        // Safety timeout to reset flag if first frame not received
+        handler.removeCallbacks(resetRotationFlagRunnable)
+        handler.postDelayed(resetRotationFlagRunnable, 2000)
     }
+
+    private val resetRotationFlagRunnable = Runnable { isRotating = false }
 
     private fun applyRotationToViews() {
         val thermalOffset = if (isThermalMode) 270 else 0
@@ -254,6 +315,7 @@ class LiveFragment : Fragment() {
     }
 
     private fun showTopLeftError(message: String) {
+        if (isRotating) return
         val toast = Toast.makeText(context, message, Toast.LENGTH_LONG)
         toast.setGravity(Gravity.TOP or Gravity.START, 48, 48)
         toast.show()
@@ -270,6 +332,21 @@ class LiveFragment : Fragment() {
         Log.i(TAG, "Starting playback: $targetUri")
         
         applyRotationToViews()
+
+        // Start Mavlink client
+        try {
+            stopMavlink()
+            mavClient = MavlinkTcpClient(object : MavlinkTcpClient.TelemetryListener {
+                override fun onTelemetryUpdate(data: TelemetryData) {
+                    handler.post {
+                        liveViewModel.telemetryData.value = data
+                    }
+                }
+            })
+            mavClient?.start(osdIp, osdPort)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start Mavlink client", e)
+        }
 
         if (isThermalMode) {
             binding.svVideoSurface.visibility = View.GONE
@@ -532,9 +609,16 @@ class LiveFragment : Fragment() {
         startPlayback()
     }
 
+    private fun stopMavlink() {
+        mavClient?.stop()
+        mavClient = null
+        liveViewModel.telemetryData.value = TelemetryData()
+    }
+
     override fun onPause() {
         super.onPause()
         stopRecording()
+        stopMavlink()
         binding.svVideoSurface.stop()
         binding.ivVideoImage.stop()
     }

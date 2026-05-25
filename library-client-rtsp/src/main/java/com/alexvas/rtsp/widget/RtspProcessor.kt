@@ -74,11 +74,14 @@ class RtspProcessor(
     private var videoVps: ByteArray? = null
 
     fun getVideoMediaFormat(): MediaFormat? {
-        if (videoMimeType.isEmpty() || videoWidthHint == null || videoHeightHint == null) return null
+        if (videoMimeType.isEmpty() || videoWidthHint == null || videoHeightHint == null || videoSps == null) return null
         val format = MediaFormat.createVideoFormat(videoMimeType, videoWidthHint!!, videoHeightHint!!)
         videoSps?.let { format.setByteBuffer("csd-0", ByteBuffer.wrap(it)) }
         videoPps?.let { format.setByteBuffer("csd-1", ByteBuffer.wrap(it)) }
-        videoVps?.let { format.setByteBuffer("csd-2", ByteBuffer.wrap(it)) }
+        // For H.265 (HEVC)
+        if (videoMimeType == MediaFormat.MIMETYPE_VIDEO_HEVC) {
+            videoVps?.let { format.setByteBuffer("csd-2", ByteBuffer.wrap(it)) }
+        }
         return format
     }
     var statistics = Statistics()
@@ -109,8 +112,21 @@ class RtspProcessor(
      */
     var videoRotation = 0
         set(value) {
-            if (value == 0 || value == 90 || value == 180 || value == 270)
-                field = value
+            if (value == 0 || value == 90 || value == 180 || value == 270) {
+                if (field != value) {
+                    field = value
+                    if (isStarted()) {
+                        // Restart only decoders. RTSP connection should be still active.
+                        // Add small delay to ensure previous decoder thread is finished.
+                        uiHandler.postDelayed({
+                            if (isStarted()) {
+                                stopDecoders()
+                                onRtspClientConnected()
+                            }
+                        }, 150)
+                    }
+                }
+            }
         }
 
     /**
@@ -418,8 +434,10 @@ class RtspProcessor(
                     .build()
                 rtspClient.execute()
             } catch (e: Exception) {
-                e.printStackTrace()
-                uiHandler.post { proxyClientListener.onRtspFailed(e.message) }
+                if (!rtspStopped.get()) {
+                    e.printStackTrace()
+                    uiHandler.post { proxyClientListener.onRtspFailed(e.message) }
+                }
             } finally {
                 NetUtils.closeSocket(socket)
             }

@@ -8,6 +8,7 @@ import android.util.Log
 import android.widget.EditText
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
+import com.alexvas.rtsp.demo.data.TelemetryData
 
 private const val RTSP_REQUEST_KEY = "rtsp_request"
 private const val RTSP_USERNAME_KEY = "rtsp_username"
@@ -30,6 +31,10 @@ class LiveViewModel : ViewModel() {
     }
     val rtspPassword = MutableLiveData<String>().apply {
         value = DEFAULT_RTSP_PASSWORD
+    }
+
+    val telemetryData = MutableLiveData<TelemetryData>().apply {
+        value = TelemetryData()
     }
 
 //    private val _text = MutableLiveData<String>().apply {

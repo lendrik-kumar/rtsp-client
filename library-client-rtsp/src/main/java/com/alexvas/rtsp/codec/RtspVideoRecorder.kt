@@ -31,13 +31,19 @@ class RtspVideoRecorder {
     @Synchronized
     fun start(format: MediaFormat) {
         if (isStarted || muxer == null) return
+        
+        // Ensure format has SPS/PPS (csd-0/csd-1) for better compatibility
+        if (!format.containsKey("csd-0")) {
+            Log.w(TAG, "MediaFormat missing csd-0 (SPS), recording might be unplayable")
+        }
+
         try {
             videoTrackIndex = muxer!!.addTrack(format)
             muxer!!.start()
             isStarted = true
             baseTimestampUs = -1L
             firstKeyframeReceived = false
-            Log.i(TAG, "Muxer started")
+            Log.i(TAG, "Muxer started with track $videoTrackIndex")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start muxer", e)
         }
