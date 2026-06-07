@@ -653,7 +653,7 @@ class LiveFragment : Fragment() {
     companion object {
         private val TAG: String = LiveFragment::class.java.simpleName
         private const val REQUEST_WRITE_STORAGE = 1001
-        private const val REQUEST_WRITE_STORAGE_SNAPSHOT = 1002
+lk        private const val REQUEST_WRITE_STORAGE_SNAPSHOT = 1002
         private const val REQUEST_WRITE_STORAGE_INIT = 1003
     }
 }
