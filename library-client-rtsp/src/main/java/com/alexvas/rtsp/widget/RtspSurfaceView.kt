@@ -57,7 +57,9 @@ open class RtspSurfaceView: SurfaceView {
 
     var videoRotation: Int
         get() = rtspProcessor.videoRotation
-        set(value) { rtspProcessor.videoRotation = value }
+        set(value) {
+            rtspProcessor.videoRotation = value
+        }
 
     var videoDecoderType: DecoderType
         get() = rtspProcessor.videoDecoderType

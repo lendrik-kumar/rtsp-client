@@ -2,18 +2,18 @@ package com.alexvas.rtsp.demo.live
 
 import android.annotation.SuppressLint
 import android.content.ContentValues
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.*
 import android.provider.MediaStore
 import android.util.Log
 import android.view.*
-import android.widget.EditText
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
@@ -46,7 +46,7 @@ class LiveFragment : Fragment() {
     private var isThermalMode = false
     private var recordingUri: Uri? = null
 
-    private var currentRotation = 0
+    private var currentRotation = 180
     private var isRotating = false
 
     private var mavClient: MavlinkTcpClient? = null
@@ -133,15 +133,7 @@ class LiveFragment : Fragment() {
 
     private val rtspDataListener = object : RtspDataListener {
         override fun onRtspDataVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestampUs: Long, isKeyframe: Boolean) {
-            videoRecorder?.let { recorder ->
-                _binding?.let { b ->
-                    val format = if (isThermalMode) b.ivVideoImage.getVideoMediaFormat() else b.svVideoSurface.getVideoMediaFormat()
-                    if (format != null) {
-                        recorder.start(format)
-                    }
-                    recorder.writeVideoData(data, offset, length, timestampUs, isKeyframe)
-                }
-            }
+            // Raw packet handling removed as we are recording rendered bitmaps now
         }
     }
 
@@ -158,15 +150,53 @@ class LiveFragment : Fragment() {
         _binding = null
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_WRITE_STORAGE) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                startRecording()
+            } else {
+                showTopLeftError("Storage permission required")
+            }
+        }
+        if (requestCode == REQUEST_WRITE_STORAGE_SNAPSHOT) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                takeSnapshot()
+            } else {
+                showTopLeftError("Storage permission required")
+            }
+        }
+        if (requestCode == REQUEST_WRITE_STORAGE_INIT) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                Toast.makeText(context, "Storage permission granted", Toast.LENGTH_SHORT).show()
+            } else {
+                showTopLeftError("Storage permission required")
+            }
+        }
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         hideSystemUI()
 
+        requestStoragePermissionIfNeeded()
+
         binding.svVideoSurface.setStatusListener(rtspStatusListener)
         binding.svVideoSurface.setDataListener(rtspDataListener)
         binding.ivVideoImage.setStatusListener(rtspStatusListener)
         binding.ivVideoImage.setDataListener(rtspDataListener)
+        
+        binding.ivVideoImage.onRtspImageBitmapListener = object : com.alexvas.rtsp.widget.RtspImageView.RtspImageBitmapListener {
+            override fun onRtspImageBitmapObtained(bitmap: Bitmap) {
+                videoRecorder?.let { recorder ->
+                    if (!recorder.isRecording()) {
+                        recorder.start(bitmap.width, bitmap.height)
+                    }
+                    recorder.recordBitmap(bitmap)
+                }
+            }
+        }
 
         // Ensure OSD is on top
         binding.svVideoSurface.setZOrderMediaOverlay(true)
@@ -176,11 +206,8 @@ class LiveFragment : Fragment() {
         binding.ivVideoImage.videoDecoderType = VideoDecodeThread.DecoderType.SOFTWARE
 
         binding.bnReload.setOnClickListener { reloadStream() }
-        binding.bnEditOsd.setOnClickListener { showOsdEditDialog() }
         binding.bnSnapshot.setOnClickListener { takeSnapshot() }
         binding.bnRecord.setOnClickListener { if (isRecording) stopRecording() else startRecording() }
-
-        binding.bnRotate.setOnClickListener { rotateVideo() }
 
         binding.bnThermalToggle.setOnClickListener { toggleThermal() }
 
@@ -202,30 +229,6 @@ class LiveFragment : Fragment() {
 
     private fun updateOsd(data: TelemetryData) {
         binding.osdOverlayView.updateTelemetry(data)
-    }
-
-    private fun showOsdEditDialog() {
-        val input = EditText(requireContext())
-        input.setText("$osdIp:$osdPort")
-        input.setPadding(48, 48, 48, 48)
-
-        AlertDialog.Builder(requireContext())
-            .setTitle("Edit OSD Link")
-            .setMessage("Enter IP:Port (TCP)")
-            .setView(input)
-            .setPositiveButton("Update") { _, _ ->
-                val text = input.text.toString().trim()
-                val parts = text.split(":")
-                if (parts.size == 2) {
-                    osdIp = parts[0]
-                    osdPort = parts[1].toIntOrNull() ?: 20001
-                    reloadStream()
-                } else {
-                    Toast.makeText(context, "Invalid format. Use IP:Port", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -293,25 +296,9 @@ class LiveFragment : Fragment() {
         applyTransformations()
     }
 
-    private fun rotateVideo() {
-        isRotating = true
-        currentRotation = (currentRotation + 90) % 360
-        // Reset transformations as center changes
-        resetTransformations()
-        applyRotationToViews()
-        
-        // Safety timeout to reset flag if first frame not received
-        handler.removeCallbacks(resetRotationFlagRunnable)
-        handler.postDelayed(resetRotationFlagRunnable, 2000)
-    }
-
-    private val resetRotationFlagRunnable = Runnable { isRotating = false }
-
     private fun applyRotationToViews() {
-        val thermalOffset = if (isThermalMode) 270 else 0
-        val totalRotation = (currentRotation + thermalOffset) % 360
-        binding.svVideoSurface.videoRotation = totalRotation
-        binding.ivVideoImage.videoRotation = totalRotation
+        binding.svVideoSurface.videoRotation = currentRotation
+        binding.ivVideoImage.videoRotation = currentRotation
     }
 
     private fun showTopLeftError(message: String) {
@@ -348,29 +335,17 @@ class LiveFragment : Fragment() {
             Log.e(TAG, "Failed to start Mavlink client", e)
         }
 
-        if (isThermalMode) {
-            binding.svVideoSurface.visibility = View.GONE
-            binding.ivVideoImage.visibility = View.VISIBLE
-            binding.llLeftSidebar.visibility = View.VISIBLE
-            binding.ivVideoImage.init(
-                targetUri.toUri(),
-                username = liveViewModel.rtspUsername.value,
-                password = liveViewModel.rtspPassword.value,
-                userAgent = "rtsp-client-android"
-            )
-            binding.ivVideoImage.start(requestVideo = true, requestAudio = true, requestApplication = false)
-        } else {
-            binding.svVideoSurface.visibility = View.VISIBLE
-            binding.ivVideoImage.visibility = View.GONE
-            binding.llLeftSidebar.visibility = View.GONE
-            binding.svVideoSurface.init(
-                targetUri.toUri(),
-                username = liveViewModel.rtspUsername.value,
-                password = liveViewModel.rtspPassword.value,
-                userAgent = "rtsp-client-android"
-            )
-            binding.svVideoSurface.start(requestVideo = true, requestAudio = true, requestApplication = false)
-        }
+        // Always use ivVideoImage for screen-based capture and consistency
+        binding.svVideoSurface.visibility = View.GONE
+        binding.ivVideoImage.visibility = View.VISIBLE
+        binding.llLeftSidebar.visibility = if (isThermalMode) View.VISIBLE else View.GONE
+        binding.ivVideoImage.init(
+            targetUri.toUri(),
+            username = liveViewModel.rtspUsername.value,
+            password = liveViewModel.rtspPassword.value,
+            userAgent = "rtsp-client-android"
+        )
+        binding.ivVideoImage.start(requestVideo = true, requestAudio = true, requestApplication = false)
     }
 
     private fun toggleThermal() {
@@ -415,6 +390,8 @@ class LiveFragment : Fragment() {
     }
 
     private fun startRecording() {
+        if (!ensureWriteStoragePermission(REQUEST_WRITE_STORAGE)) return
+
         val activeStarted = if (isThermalMode) binding.ivVideoImage.isStarted() else binding.svVideoSurface.isStarted()
         if (!activeStarted) {
             context?.let { ctx ->
@@ -501,11 +478,18 @@ class LiveFragment : Fragment() {
             context?.let { ctx ->
                 Toast.makeText(ctx, "Video saved to Movies", Toast.LENGTH_LONG).show()
             }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                val filePath = uri.path
+                if (filePath != null) {
+                    MediaScannerConnection.scanFile(context, arrayOf(filePath), arrayOf("video/mp4"), null)
+                }
+            }
         }
         recordingUri = null
     }
 
     private fun takeSnapshot() {
+        if (!ensureWriteStoragePermission(REQUEST_WRITE_STORAGE_SNAPSHOT)) return
         val bitmap = getSnapshot()
         if (bitmap != null) {
             saveBitmapToGallery(bitmap)
@@ -575,6 +559,12 @@ class LiveFragment : Fragment() {
                     values.put(MediaStore.Images.Media.IS_PENDING, 0)
                     resolver.update(uri, values, null, null)
                 }
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    val filePath = uri.path
+                    if (filePath != null) {
+                        MediaScannerConnection.scanFile(context, arrayOf(filePath), arrayOf("image/jpeg"), null)
+                    }
+                }
                 context?.let { ctx ->
                     Toast.makeText(ctx, "Snapshot saved to Pictures", Toast.LENGTH_SHORT).show()
                 }
@@ -582,6 +572,35 @@ class LiveFragment : Fragment() {
                 Log.e(TAG, "Failed to save snapshot", e)
                 showTopLeftError("Failed to save image")
             }
+        }
+    }
+
+    private fun ensureWriteStoragePermission(requestCode: Int): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val ctx = context ?: return false
+        val writePermission = android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+        val readPermission = android.Manifest.permission.READ_EXTERNAL_STORAGE
+        val hasWrite = ContextCompat.checkSelfPermission(ctx, writePermission) == PackageManager.PERMISSION_GRANTED
+        val hasRead = ContextCompat.checkSelfPermission(ctx, readPermission) == PackageManager.PERMISSION_GRANTED
+        return if (hasWrite && hasRead) {
+            true
+        } else {
+            requestPermissions(arrayOf(writePermission, readPermission), requestCode)
+            false
+        }
+    }
+
+    private fun requestStoragePermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val ctx = context ?: return
+        val writePermission = android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+        val readPermission = android.Manifest.permission.READ_EXTERNAL_STORAGE
+        val needsWrite = ContextCompat.checkSelfPermission(ctx, writePermission) != PackageManager.PERMISSION_GRANTED
+        val needsRead = ContextCompat.checkSelfPermission(ctx, readPermission) != PackageManager.PERMISSION_GRANTED
+        if (needsWrite || needsRead) {
+            requestPermissions(arrayOf(writePermission, readPermission), REQUEST_WRITE_STORAGE_INIT)
         }
     }
 
@@ -633,5 +652,8 @@ class LiveFragment : Fragment() {
 
     companion object {
         private val TAG: String = LiveFragment::class.java.simpleName
+        private const val REQUEST_WRITE_STORAGE = 1001
+        private const val REQUEST_WRITE_STORAGE_SNAPSHOT = 1002
+        private const val REQUEST_WRITE_STORAGE_INIT = 1003
     }
 }

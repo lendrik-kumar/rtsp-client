@@ -273,6 +273,10 @@ class RtspProcessor(
             // Search for NAL_IDR_SLICE within first 1KB maximum
             val isKeyframe = VideoCodecUtils.isAnyKeyFrame(data, offset, min(length, 1000), isH265)
 
+            if (videoSps == null || videoPps == null || videoWidthHint == null || videoHeightHint == null || (isH265 && videoVps == null)) {
+                updateConfigFromNal(data, offset, length, isH265)
+            }
+
             var videoFrame = FrameQueue.VideoFrame(
                 if (isH265) VideoCodecType.H265 else VideoCodecType.H264,
                 isKeyframe,
@@ -512,6 +516,36 @@ class RtspProcessor(
         stopDecoders()
         rtspThread = null
 //        uiHandler.post { statusListener?.onRtspStatusDisconnected() }
+    }
+
+    private fun updateConfigFromNal(data: ByteArray, offset: Int, length: Int, isH265: Boolean) {
+        val nalUnitsFound = ArrayList<VideoCodecUtils.NalUnit>()
+        val count = VideoCodecUtils.getNalUnits(data, offset, length, nalUnitsFound, isH265)
+        if (count <= 0) return
+
+        for (nal in nalUnitsFound) {
+            when (nal.type) {
+                VideoCodecUtils.NAL_SPS, VideoCodecUtils.H265_NAL_SPS -> {
+                    videoSps = data.copyOfRange(nal.offset, nal.offset + nal.length)
+                    try {
+                        val startNalOffset = if (data[nal.offset + 2] == 1.toByte()) nal.offset + 4 else nal.offset + 5
+                        val spsData = NalUnitUtil.parseSpsNalUnitPayload(
+                            data, startNalOffset, nal.offset + nal.length
+                        )
+                        videoWidthHint = spsData.width
+                        videoHeightHint = spsData.height
+                    } catch (e: Exception) {
+                        if (DEBUG) Log.w(TAG, "Failed to parse SPS from stream", e)
+                    }
+                }
+                VideoCodecUtils.NAL_PPS, VideoCodecUtils.H265_NAL_PPS -> {
+                    videoPps = data.copyOfRange(nal.offset, nal.offset + nal.length)
+                }
+                VideoCodecUtils.H265_NAL_VPS -> {
+                    videoVps = data.copyOfRange(nal.offset, nal.offset + nal.length)
+                }
+            }
+        }
     }
 
     fun init(uri: Uri, username: String?, password: String?, userAgent: String? = null, socketTimeout: Int = DEFAULT_SOCKET_TIMEOUT) {

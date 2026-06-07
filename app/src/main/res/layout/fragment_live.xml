@@ -101,30 +101,12 @@
         app:layout_constraintHorizontal_bias="0.5">
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/bnRotate"
-            style="@style/Widget.Material3.Button.IconButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            app:icon="@drawable/rotate"
-            app:iconTint="@android:color/white"
-            android:layout_marginEnd="8dp"/>
-
-        <com.google.android.material.button.MaterialButton
             android:id="@+id/bnReload"
             style="@style/Widget.Material3.Button.IconButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             app:icon="@drawable/refresh"
             app:iconTint="@android:color/white"/>
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/bnEditOsd"
-            style="@style/Widget.Material3.Button.IconButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            app:icon="@drawable/ic_text_subject_black_24dp"
-            app:iconTint="@android:color/white"
-            android:layout_marginStart="8dp"/>
     </LinearLayout>
 
     <!-- Bottom 25% (Left-Center) Controls -->
